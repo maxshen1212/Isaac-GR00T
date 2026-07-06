@@ -71,7 +71,7 @@ python -c "import json; print(json.load(open('$HOME/Isaac-GR00T/datasets/bimanua
 100 steps, no wandb — just proves data load -> forward/backward -> checkpoint works.
 
 ```bash
-MAX_STEPS=100 SAVE_STEPS=100 USE_WANDB=0 GLOBAL_BATCH_SIZE=32 \
+MAX_STEPS=100 SAVE_STEPS=100 GLOBAL_BATCH_SIZE=32 \
 CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 \
 uv run bash examples/finetune.sh \
   --base-model-path nvidia/GR00T-N1.6-3B \
@@ -90,7 +90,7 @@ Pass = runs to step 100, finite decreasing loss, `/tmp/so101_smoketest/checkpoin
 ```bash
 wandb login    # once — key from https://wandb.ai/authorize
 
-MAX_STEPS=5000 SAVE_STEPS=500 GLOBAL_BATCH_SIZE=32 \
+MAX_STEPS=25000 SAVE_STEPS=00 GLOBAL_BATCH_SIZE=64 \
 CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 \
 uv run bash examples/finetune.sh \
   --base-model-path nvidia/GR00T-N1.6-3B \

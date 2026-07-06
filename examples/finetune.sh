@@ -112,7 +112,7 @@ LAUNCH_CMD=(
     --max_steps "$MAX_STEPS"
     --warmup_ratio 0.05
     --weight_decay 1e-5
-    --learning_rate 1e-4
+    --learning_rate 1.5e-4
     "${WANDB_FLAG[@]}"
     --global_batch_size "$GLOBAL_BATCH_SIZE"
     --color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08
