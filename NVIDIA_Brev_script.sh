@@ -56,12 +56,11 @@ else
     log "cuda-compat-12-8 already installed"
 fi
 
-# Persist LD_LIBRARY_PATH for CUDA compat
+# NOTE: CUDA forward-compat (cuda-compat-12-8) is applied CONDITIONALLY in Phase 3.5,
+# ONLY if torch cannot see the GPU with the instance's own driver. Forcing the compat
+# libcuda onto a driver that already supports CUDA 12.8 causes a user-mode/kernel-mode
+# driver mismatch (CUDA error 803) — that is what broke Phase 5 on the first run.
 COMPAT_LINE='export LD_LIBRARY_PATH=/usr/local/cuda-12.8/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}'
-if ! grep -qF "cuda-12.8/compat" "$HOME/.bashrc" 2>/dev/null; then
-    echo "$COMPAT_LINE" >> "$HOME/.bashrc"
-fi
-export LD_LIBRARY_PATH="/usr/local/cuda-12.8/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # Also ensure CUDA_HOME is set for deepspeed
 CUDA_HOME_LINE='export CUDA_HOME=/usr/local/cuda-12.8'
@@ -125,6 +124,32 @@ fi
 
 # Activate for subsequent phases
 source "$REPO_DIR/.venv/bin/activate"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3.5: GPU enablement (apply CUDA forward-compat only if actually needed)
+# ─────────────────────────────────────────────────────────────────────────────
+log "Phase 3.5: GPU enablement"
+
+gpu_ok() { python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; }
+
+if gpu_ok; then
+    log "GPU visible to torch with the instance's own driver — NOT applying cuda-compat."
+else
+    log "torch cannot see the GPU with the base driver — trying CUDA forward-compat..."
+    export LD_LIBRARY_PATH="/usr/local/cuda-12.8/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    if gpu_ok; then
+        log "GPU visible via cuda-compat — persisting LD_LIBRARY_PATH to ~/.bashrc."
+        if ! grep -qF "cuda-12.8/compat" "$HOME/.bashrc" 2>/dev/null; then
+            echo "$COMPAT_LINE" >> "$HOME/.bashrc"
+        fi
+    else
+        log "ERROR: GPU still unavailable (likely CUDA error 803: driver mismatch)."
+        log "  CUDA 12.8 needs NVIDIA driver >= 570. Diagnose with 'nvidia-smi'."
+        log "  Fixes: reboot the instance (reloads the kernel module), or pick a base image with a newer driver."
+        nvidia-smi || true
+        exit 1
+    fi
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 4: Dataset download + prep (SO-101 bimanual)
