@@ -78,10 +78,10 @@ uv run bash examples/finetune.sh \
   --dataset-path $HOME/Isaac-GR00T/datasets/bimanual-so101-pickvials \
   --modality-config-path examples/SO101_bimanual/so101_bimanual_config.py \
   --embodiment-tag NEW_EMBODIMENT \
-  --output-dir /tmp/so101_smoketest
+  --output-dir $HOME/Isaac-GR00T/checkpoints/so101_smoketest
 ```
 
-Pass = runs to step 100, finite decreasing loss, `/tmp/so101_smoketest/checkpoint-100/` exists.
+Pass = runs to step 100, finite decreasing loss, `$HOME/Isaac-GR00T/checkpoints/so101_smoketest/checkpoint-100/` exists.
 
 ---
 
@@ -90,14 +90,14 @@ Pass = runs to step 100, finite decreasing loss, `/tmp/so101_smoketest/checkpoin
 ```bash
 wandb login    # once — key from https://wandb.ai/authorize
 
-MAX_STEPS=25000 SAVE_STEPS=00 GLOBAL_BATCH_SIZE=64 \
+MAX_STEPS=25000 SAVE_STEPS=2500 GLOBAL_BATCH_SIZE=64 \
 CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 \
 uv run bash examples/finetune.sh \
   --base-model-path nvidia/GR00T-N1.6-3B \
   --dataset-path $HOME/Isaac-GR00T/datasets/bimanual-so101-pickvials \
   --modality-config-path examples/SO101_bimanual/so101_bimanual_config.py \
   --embodiment-tag NEW_EMBODIMENT \
-  --output-dir /tmp/so101_bimanual_finetune \
+  --output-dir $HOME/Isaac-GR00T/checkpoints/so101_bimanual_finetune \
   --wandb-project so101-bimanual \
   --experiment-name pickvials-run1
 ```
@@ -114,7 +114,7 @@ for ckpt in 3000 3500 4000 4500 5000; do
   uv run python gr00t/eval/open_loop_eval.py \
     --dataset-path $HOME/Isaac-GR00T/datasets/bimanual-so101-pickvials \
     --embodiment-tag NEW_EMBODIMENT \
-    --model-path /tmp/so101_bimanual_finetune/checkpoint-$ckpt \
+    --model-path $HOME/Isaac-GR00T/checkpoints/so101_bimanual_finetune/checkpoint-$ckpt \
     --traj-ids 0 1 2 --action-horizon 16 --steps 400
 done
 ```
@@ -125,15 +125,15 @@ Pick the checkpoint with lowest action MSE where the wandb loss had flattened (n
 
 ## 6. Upload the trained model to Hugging Face
 
-`/tmp` is wiped when the instance stops — **upload before shutting down.**
+Checkpoints now live under `$HOME/Isaac-GR00T/checkpoints/` (persistent, survives reboots) — but the whole **instance can still be deleted**, so upload before tearing it down.
 
 ```bash
 hf auth login    # once — WRITE token from https://huggingface.co/settings/tokens
 
-ls /tmp/so101_bimanual_finetune/     # pick a checkpoint that exists
+ls $HOME/Isaac-GR00T/checkpoints/so101_bimanual_finetune/     # pick a checkpoint that exists
 uv run hf upload \
   ChihHanShen/gr00t-n1.6-so101-bimanual-pickvials \
-  /tmp/so101_bimanual_finetune/checkpoint-5000 \
+  $HOME/Isaac-GR00T/checkpoints/so101_bimanual_finetune/checkpoint-5000 \
   . \
   --repo-type model      # add --private to keep it unlisted
 ```
