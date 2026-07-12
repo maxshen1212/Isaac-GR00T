@@ -24,6 +24,8 @@ runs/
 out/
 recordings/
 plots/
+/checkpoints/
+/datasets/
 *.npz
 
 # C extensions

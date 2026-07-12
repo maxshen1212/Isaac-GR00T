@@ -135,7 +135,12 @@ fi
 # ── Phase 4: Dataset download + prep ─────────────────────────────────────────
 log "Phase 4: Dataset download + prep"
 
-# 4a. Download (public dataset, no token needed).
+# 4a. Download. The dataset is public, but HF rate-limits anonymous downloads
+#     per-IP; shared cloud IPs hit HTTP 429 fast, so provide HF_TOKEN.
+if [ -z "${HF_TOKEN:-}" ] && [ ! -f "$HOME/.cache/huggingface/token" ]; then
+    log "WARN: no HF_TOKEN / login detected — anonymous download may fail with HTTP 429."
+    log "      Set 'export HF_TOKEN=<read-token>' (or run 'hf auth login') before this script."
+fi
 if [ ! -f "$DATASET_PATH/meta/info.json" ]; then
     log "Downloading $DATASET_REPO_ID -> $DATASET_PATH"
     uv run hf download "$DATASET_REPO_ID" --repo-type dataset --local-dir "$DATASET_PATH"
@@ -178,7 +183,8 @@ log "============================================================"
 log " Setup complete. Next steps: see CHEATSHEET.md (STEP 1 onward)."
 log "============================================================"
 log ""
-log "First (once): hf auth login  +  wandb login   # see CHEATSHEET.md STEP 1"
+log "First (once): request access to BOTH nvidia/GR00T-N1.7-3B and the gated backbone"
+log "  nvidia/Cosmos-Reason2-2B, then 'hf auth login' + 'wandb login'  # see CHEATSHEET.md STEP 1"
 log "Finetune + auto-upload on success:"
 log ""
 echo "  cd $REPO_DIR && source .venv/bin/activate && export PATH=\"$HOME/.local/bin:\$PATH\""
