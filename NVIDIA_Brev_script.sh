@@ -1,31 +1,22 @@
 #!/bin/bash
-# setup_groot_so101.sh — 設定 Brev 執行個體以進行
-# Isaac GR00T N1.7 微調（SO-101 雙臂，使用自有的 Hugging Face 資料集）
-#
-# 目標 GPU：NVIDIA RTX PRO 6000（Blackwell 架構，sm_120，96GB）
-# 註：N1.7 已從 N1.6 的 Eagle backbone 換成 Cosmos-Reason2-2B（Qwen3-VL），
-#     因此必須使用 N1.7 的程式碼（n1.7-graphen 分支），不能沿用 N1.6。
+# Configure a Brev instance for Isaac GR00T N1.7 finetuning (SO-101 bimanual).
+# Target GPU: NVIDIA RTX PRO 6000 (Blackwell, sm_120, 96GB).
+# Training / upload / eval commands and rationale: see CHEATSHEET.md.
 set -euo pipefail
 
 REPO_DIR="${GROOT_REPO_DIR:-$HOME/Isaac-GR00T}"
-
-# 複製你自己的 fork / 分支 —— 內含 examples/SO101_bimanual/（config + modality.json）。
-# NVIDIA 官方 repo 沒有這些雙臂設定檔。
 GROOT_REPO_URL="${GROOT_REPO_URL:-https://github.com/maxshen1212/Isaac-GR00T.git}"
 GROOT_BRANCH="${GROOT_BRANCH:-n1.7-graphen}"
-
-# N1.7 基礎模型（已正式釋出；若 HF 頁面有授權門檻，需先接受條款並 hf auth login 才能下載）。
 BASE_MODEL="${BASE_MODEL:-nvidia/GR00T-N1.7-3B}"
 
-# 你自己的公開 Hugging Face 資料集（LeRobot v3.0 —— 下方會轉成 v2.1）。
+# Public HF dataset (LeRobot v3.0 — converted to v2.1 below).
 DATASET_REPO_ID="${DATASET_REPO_ID:-ChihHanShen/bimanual-so101-pickvials}"
 DATASET_ROOT="$REPO_DIR/datasets"
 DATASET_PATH="$DATASET_ROOT/$(basename "$DATASET_REPO_ID")"
 
-# checkpoint 輸出目錄（放在 repo 內，重開機後仍保留；不要用 /tmp，關機會被清空）。
+# Checkpoints live inside the repo so they survive reboots (not /tmp).
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/checkpoints/so101_bimanual_finetune}"
 
-# 非 root 時才加 sudo
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
     SUDO="sudo"
@@ -33,9 +24,7 @@ fi
 
 log() { echo "==> $*"; }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 1：系統相依套件（System dependencies）
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Phase 1: System dependencies ─────────────────────────────────────────────
 log "Phase 1: System dependencies"
 
 $SUDO apt-get update -qq
@@ -44,16 +33,13 @@ $SUDO apt-get install -y --no-install-recommends \
 
 git lfs install
 
-# torchcodec（N1.7 唯一的影片解碼後端）只支援 FFmpeg 4–7，「不支援 FFmpeg 8」。
-# 若這裡裝到 8，訓練時讀影片會失敗 —— 先警告，讓你有機會換版本。
+# torchcodec (N1.7's video backend) supports FFmpeg 4–7 only, not 8.
 FFMPEG_MAJOR="$(ffmpeg -version 2>/dev/null | head -1 | grep -oE 'version [0-9]+' | grep -oE '[0-9]+' || echo '')"
 if [ -n "$FFMPEG_MAJOR" ] && [ "$FFMPEG_MAJOR" -ge 8 ] 2>/dev/null; then
-    log "警告：偵測到 FFmpeg $FFMPEG_MAJOR，torchcodec 只支援 4–7，影片解碼可能失敗。"
-    log "      解法：改用提供 FFmpeg 4–7 的基底映像，或降級 ffmpeg 套件。"
+    log "WARN: FFmpeg $FFMPEG_MAJOR detected; torchcodec needs 4–7, video decode may fail."
 fi
 
-# CUDA toolkit 12.8（提供 nvcc 給 deepspeed JIT）。
-# Blackwell（sm_120）需要 CUDA 12.8 以上 + 驅動 570 以上；RTX PRO 6000 通常搭配 580。
+# CUDA toolkit 12.8 (nvcc for deepspeed JIT).
 if ! dpkg -s cuda-toolkit-12-8 &>/dev/null; then
     UBUNTU_VERSION=$(. /etc/os-release && echo "${VERSION_ID//.}")
     if ! apt-cache show cuda-toolkit-12-8 &>/dev/null; then
@@ -69,193 +55,133 @@ else
     log "cuda-toolkit-12-8 already installed"
 fi
 
-# CUDA forward-compat 函式庫 —— 讓舊驅動也能跑 CUDA 12.8 runtime。
+# forward-compat libs — only applied in Phase 3.5 if the driver can't see the GPU.
 if ! dpkg -s cuda-compat-12-8 &>/dev/null; then
     $SUDO apt-get install -y --no-install-recommends cuda-compat-12-8
 else
     log "cuda-compat-12-8 already installed"
 fi
-
-# 註：cuda-compat 只在 Phase 3.5「torch 看不到 GPU 時」才會被啟用。
-# 若驅動本來就支援 CUDA 12.8，強行套用 compat 的 libcuda 會造成
-# 使用者態/核心態驅動不一致（CUDA error 803）。
 COMPAT_LINE='export LD_LIBRARY_PATH=/usr/local/cuda-12.8/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}'
 
-# 設定 CUDA_HOME 給 deepspeed 使用
-CUDA_HOME_LINE='export CUDA_HOME=/usr/local/cuda-12.8'
-if ! grep -qF "CUDA_HOME" "$HOME/.bashrc" 2>/dev/null; then
-    echo "$CUDA_HOME_LINE" >> "$HOME/.bashrc"
-fi
+# CUDA_HOME for deepspeed.
+grep -qF "CUDA_HOME" "$HOME/.bashrc" 2>/dev/null || echo 'export CUDA_HOME=/usr/local/cuda-12.8' >> "$HOME/.bashrc"
 export CUDA_HOME=/usr/local/cuda-12.8
 export PATH="$CUDA_HOME/bin:$PATH"
 
-# 確保這個 process 裡有可用的 uv
+# uv
 if ! command -v uv &>/dev/null && [ ! -x "$HOME/.local/bin/uv" ]; then
     log "Installing uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 export PATH="$HOME/.local/bin:$PATH"
-UV_PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
-if ! grep -qF "$UV_PATH_LINE" "$HOME/.bashrc" 2>/dev/null; then
-    echo "$UV_PATH_LINE" >> "$HOME/.bashrc"
-fi
-
-if command -v uv &>/dev/null; then
-    UV_BIN="$(command -v uv)"
-elif [ -x "$HOME/.local/bin/uv" ]; then
-    UV_BIN="$HOME/.local/bin/uv"
-else
-    log "ERROR: uv is not available in PATH and ~/.local/bin/uv was not found."
+grep -qF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null || \
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+if ! command -v uv &>/dev/null; then
+    log "ERROR: uv not found in PATH or ~/.local/bin."
     exit 1
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 2：複製 Isaac-GR00T（你的 fork / N1.7 雙臂分支）
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Phase 2: Clone Isaac-GR00T ───────────────────────────────────────────────
 log "Phase 2: Clone Isaac-GR00T ($GROOT_REPO_URL @ $GROOT_BRANCH)"
 
 if [ ! -d "$REPO_DIR/.git" ]; then
     git clone --recurse-submodules "$GROOT_REPO_URL" "$REPO_DIR"
     cd "$REPO_DIR"
     git checkout "$GROOT_BRANCH"
-    git submodule update --init --recursive
 else
     log "Repository already cloned at $REPO_DIR"
     cd "$REPO_DIR"
     git fetch origin "$GROOT_BRANCH"
     git checkout "$GROOT_BRANCH"
-    git pull --ff-only origin "$GROOT_BRANCH" || log "Could not fast-forward; continuing with current state"
-    git submodule update --init --recursive
+    git pull --ff-only origin "$GROOT_BRANCH" || log "Could not fast-forward; keeping current state"
 fi
-
+git submodule update --init --recursive
 cd "$REPO_DIR"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 3：Python 環境（用 repo 自帶的安裝腳本）
-# ─────────────────────────────────────────────────────────────────────────────
-# N1.7 的 dgpu/install_deps.sh 會做：安裝 ffmpeg/CUDA toolkit、uv sync
-# （torch 2.7.1+cu128）、以及 uv pip install -e .
+# ── Phase 3: Python environment ──────────────────────────────────────────────
 log "Phase 3: Python environment"
 
 if [ ! -d "$REPO_DIR/.venv" ]; then
-    bash scripts/deployment/dgpu/install_deps.sh
+    bash scripts/deployment/dgpu/install_deps.sh   # ffmpeg/CUDA + uv sync + editable install
 else
     log ".venv already exists, skipping install_deps.sh"
 fi
-
-# 啟用 venv 供後續 phase 使用
 source "$REPO_DIR/.venv/bin/activate"
 
-# 註：若之後 flash-attn 在 Blackwell（sm_120）報 "no kernel image available for device"，
-#     需針對 cu128 重新編譯 flash-attn（預編 wheel 可能還沒支援 Blackwell）。
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 3.5：GPU 啟用（只有真的需要時才套用 CUDA forward-compat）
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Phase 3.5: GPU enablement ────────────────────────────────────────────────
+# Apply CUDA forward-compat only if the GPU isn't already visible: forcing it
+# when the driver natively supports CUDA 12.8 causes a user/kernel driver
+# mismatch (CUDA error 803).
 log "Phase 3.5: GPU enablement"
 
 gpu_ok() { python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; }
 
 if gpu_ok; then
-    log "GPU visible to torch with the instance's own driver — NOT applying cuda-compat."
+    log "GPU visible with the instance driver — not applying cuda-compat."
 else
-    log "torch cannot see the GPU with the base driver — trying CUDA forward-compat..."
+    log "GPU not visible — trying CUDA forward-compat..."
     export LD_LIBRARY_PATH="/usr/local/cuda-12.8/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     if gpu_ok; then
-        log "GPU visible via cuda-compat — persisting LD_LIBRARY_PATH to ~/.bashrc."
-        if ! grep -qF "cuda-12.8/compat" "$HOME/.bashrc" 2>/dev/null; then
-            echo "$COMPAT_LINE" >> "$HOME/.bashrc"
-        fi
+        log "GPU visible via cuda-compat — persisting to ~/.bashrc."
+        grep -qF "cuda-12.8/compat" "$HOME/.bashrc" 2>/dev/null || echo "$COMPAT_LINE" >> "$HOME/.bashrc"
     else
-        # Blackwell（RTX PRO 6000）需要驅動 570 以上（建議 580）。
-        log "ERROR: GPU still unavailable (likely CUDA error 803: driver mismatch)."
-        log "  Blackwell/CUDA 12.8 needs NVIDIA driver >= 570. Diagnose with 'nvidia-smi'."
-        log "  Fixes: reboot the instance (reloads the kernel module), or pick a base image with a newer driver."
+        log "ERROR: GPU still unavailable (likely CUDA error 803). Blackwell/CUDA 12.8 needs driver >= 570."
+        log "  Fix: reboot the instance, or use a base image with a newer driver."
         nvidia-smi || true
         exit 1
     fi
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 4：資料集下載 + 前處理（SO-101 雙臂）
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Phase 4: Dataset download + prep ─────────────────────────────────────────
 log "Phase 4: Dataset download + prep"
 
-# 4a. 從 Hugging Face 下載資料集（公開 → 不需 token）。
+# 4a. Download (public dataset, no token needed).
 if [ ! -f "$DATASET_PATH/meta/info.json" ]; then
     log "Downloading $DATASET_REPO_ID -> $DATASET_PATH"
-    uv run hf download "$DATASET_REPO_ID" \
-        --repo-type dataset --local-dir "$DATASET_PATH"
+    uv run hf download "$DATASET_REPO_ID" --repo-type dataset --local-dir "$DATASET_PATH"
 else
     log "Dataset already present at $DATASET_PATH"
 fi
 
-# 4b. GR00T 的 loader 只讀 LeRobot v2.1；若是 v3.0 就原地轉換。
-#     原始版本會自動備份為 <dataset>_v30。
+# 4b. GR00T reads LeRobot v2.1 only; convert v3.0 in place (backs up to <dataset>_v30).
 if grep -q '"v3.0"' "$DATASET_PATH/meta/info.json"; then
-    log "Dataset is LeRobot v3.0 — converting to v2.1"
+    log "Converting LeRobot v3.0 -> v2.1"
     GIT_LFS_SKIP_SMUDGE=1 uv run --project scripts/lerobot_conversion --python 3.10 \
         python scripts/lerobot_conversion/convert_v3_to_v2.py \
         --repo-id "$(basename "$DATASET_REPO_ID")" \
         --root "$DATASET_ROOT"
 else
-    log "Dataset already v2.1 (or non-v3.0) — skipping conversion"
+    log "Dataset already v2.1 — skipping conversion"
 fi
 
-# 4c. 安裝雙臂 modality.json（必要；資料集本身不含）。
+# 4c. Install bimanual modality.json (not shipped with the dataset).
 log "Installing bimanual modality.json"
 cp examples/SO101_bimanual/modality.json "$DATASET_PATH/meta/modality.json"
 
-# 4d.（N1.7 新增步驟）為自訂 embodiment 產生正規化統計。
-#     N1.7 訓練會用到 meta/relative_stats.json；先透過 modality config 註冊
-#     NEW_EMBODIMENT，再計算統計，避免訓練時因統計缺失/長度不符而報錯。
-log "Generating dataset stats (N1.7 requirement for custom embodiment)"
+# 4d. Generate meta/relative_stats.json (required by N1.7 for custom embodiments).
+log "Generating dataset stats"
 uv run python gr00t/data/stats.py \
     --dataset-path "$DATASET_PATH" \
     --embodiment-tag NEW_EMBODIMENT \
     --modality-config-path examples/SO101_bimanual/so101_bimanual_config.py
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 5：驗證（Verification）
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Phase 5: Verification ────────────────────────────────────────────────────
 log "Phase 5: Verification"
 
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}, GPU: {torch.cuda.get_device_name(0)}')"
 python -c "from gr00t.data.embodiment_tags import EmbodimentTag; print('GR00T imports OK')"
-python -c "import json; v=json.load(open('$DATASET_PATH/meta/info.json'))['codebase_version']; assert v=='v2.1', f'dataset is {v}, expected v2.1'; print(f'Dataset codebase_version OK: {v}')"
-# 確認 N1.7 統計檔已產生
-python -c "import os; p='$DATASET_PATH/meta/relative_stats.json'; print('relative_stats.json OK' if os.path.exists(p) else 'WARN: relative_stats.json missing (stats.py 可能失敗)')"
+python -c "import json; v=json.load(open('$DATASET_PATH/meta/info.json'))['codebase_version']; assert v=='v2.1', f'dataset is {v}'; print(f'Dataset version OK: {v}')"
+python -c "import os; p='$DATASET_PATH/meta/relative_stats.json'; print('relative_stats.json OK' if os.path.exists(p) else 'WARN: relative_stats.json missing')"
 
 log ""
 log "============================================================"
-log " Setup complete. 環境已就緒，可進行 N1.7 SO-101 雙臂微調。"
+log " Setup complete. Next steps: see CHEATSHEET.md (STEP 1 onward)."
 log "============================================================"
 log ""
-log "微調前置作業（首次執行會下載 N1.7 模型；如有授權門檻需先接受條款）："
+log "First (once): hf auth login  +  wandb login   # see CHEATSHEET.md STEP 1"
+log "Finetune + auto-upload on success:"
 log ""
-log "  # (once) 先接受 https://huggingface.co/$BASE_MODEL 的授權條款，"
-log "  #        再用 WRITE token 登入，才能下載模型："
-log "  #   hf auth login          # ...或 export HF_TOKEN=<token>"
-log "  # (once) 讓訓練日誌上傳到 wandb.ai："
-log "  #   wandb login <YOUR_API_KEY>     # key: https://wandb.ai/authorize"
-log "  # 想關閉 wandb：在指令前加 USE_WANDB=0，並移除 --wandb-* 參數。"
-log ""
-log "微調指令（N1.7）："
-log ""
-echo "  cd $REPO_DIR"
-echo "  source .venv/bin/activate"
-echo "  export PATH=\"$HOME/.local/bin:\$PATH\""
-echo "  # 資料量：159 episodes / ~176.7k 有效樣本 / 單任務。"
-echo "  # 正確錨點是 epochs = steps x batch / 176700，不是照抄官方 8 卡的 step 數。"
-echo "  #   batch 64 x 30000 steps ~= 11 epochs（單卡建議值）"
-echo "  # LR 維持 1e-4（官方 batch 32~640 都用它）；grad_accum 維持預設 1（顯存塞得下，不需要）。"
-echo "  # SAVE_STEPS=5000 x SAVE_TOTAL_LIMIT=6 = 6 個 checkpoint（5K,10K,...,30K，每個 ~10GB，約 60GB）。"
-echo "  # 選 checkpoint：官方做法是直接用終點 checkpoint-30000，以實機/模擬 task success rate 評選。"
-echo "  # open-loop MSE 只是訓練健康檢查（應隨 step 單調下降；rising=訓練壞掉，非過擬合），不是選擇器。"
-echo "  # 若要防過擬合，切出 held-out episodes 只在那上面比 MSE，別看訓練軌跡的 MSE。"
-echo "  # 訓練成功後（&&）自動把 $OUTPUT_DIR 底下所有 checkpoint 上傳到 HF。"
-echo "  # 需先 hf auth login（WRITE token）。--exclude 略過 optimizer.pt（只推理用不到，省一半上傳量）；"
-echo "  # 想要可續訓的完整備份就拿掉 --exclude。上傳失敗不影響本地檔案，可單獨重跑最後那段 hf upload。"
+echo "  cd $REPO_DIR && source .venv/bin/activate && export PATH=\"$HOME/.local/bin:\$PATH\""
 echo "  CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 \\"
 echo "  MAX_STEPS=30000 SAVE_STEPS=5000 SAVE_TOTAL_LIMIT=6 GLOBAL_BATCH_SIZE=64 \\"
 echo "  uv run bash examples/finetune.sh \\"
@@ -268,26 +194,3 @@ echo "    --wandb-project so101-bimanual \\"
 echo "    --experiment-name pickvials-n1p7-run1 \\"
 echo "  && uv run hf upload ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials \\"
 echo "       $OUTPUT_DIR . --repo-type model --exclude '*optimizer.pt'"
-log ""
-log "手動上傳（若上面的 && 自動上傳失敗，可單獨重跑這段；不影響已在本地的 checkpoint）："
-log ""
-log "  # checkpoints 放在 repo 內（重開機仍在），但整台執行個體被刪除前仍要先上傳。"
-echo "  cd $REPO_DIR"
-echo "  source .venv/bin/activate"
-echo "  export PATH=\"$HOME/.local/bin:\$PATH\""
-echo "  # 先看有哪些 checkpoint： ls $OUTPUT_DIR"
-echo "  # 一次上傳整個 output-dir（6 個 checkpoint + 最終模型）；--exclude 省略 optimizer.pt。"
-echo "  uv run hf upload \\"
-echo "    ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials \\"
-echo "    $OUTPUT_DIR \\"
-echo "    . \\"
-echo "    --repo-type model --exclude '*optimizer.pt'   # 加 --private 可保持不公開；拿掉 --exclude 則含 optimizer 可續訓"
-log ""
-log "訓練後做 open-loop 評估："
-log ""
-echo "  export PATH=\"$HOME/.local/bin:\$PATH\""
-echo "  uv run python gr00t/eval/open_loop_eval.py \\"
-echo "    --dataset-path $DATASET_PATH \\"
-echo "    --embodiment-tag NEW_EMBODIMENT \\"
-echo "    --model-path $OUTPUT_DIR/checkpoint-30000 \\"
-echo "    --traj-ids 0 --execution-horizon 16 --steps 400"
