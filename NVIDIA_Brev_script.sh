@@ -1,21 +1,17 @@
 #!/bin/bash
-# Configure a Brev instance for Isaac GR00T N1.7 finetuning (SO-101 bimanual).
-# Target GPU: NVIDIA RTX PRO 6000 (Blackwell, sm_120, 96GB).
-# Training / upload / eval commands and rationale: see CHEATSHEET.md.
+# Environment setup only: deps, repo, venv, GPU. No credentials, no data, no training.
+# Paste into Brev's Setup Script field. Everything after this: CHEATSHEET.md.
+# Target: 4x RTX PRO 6000 (Blackwell, sm_120, 96GB) / 60 CPU / 768 GiB RAM.
+#
+# Deliberately does NOT fetch the dataset: that step runs after `hf auth login`
+# (CHEATSHEET.md STEP 1), which keeps HF credentials out of this file and, because
+# the download is then authenticated, sidesteps the per-IP 429 that anonymous
+# pulls hit on shared cloud IPs.
 set -euo pipefail
 
 REPO_DIR="${GROOT_REPO_DIR:-$HOME/Isaac-GR00T}"
 GROOT_REPO_URL="${GROOT_REPO_URL:-https://github.com/maxshen1212/Isaac-GR00T.git}"
 GROOT_BRANCH="${GROOT_BRANCH:-n1.7-graphen}"
-BASE_MODEL="${BASE_MODEL:-nvidia/GR00T-N1.7-3B}"
-
-# Public HF dataset (LeRobot v3.0 — converted to v2.1 below).
-DATASET_REPO_ID="${DATASET_REPO_ID:-ChihHanShen/bimanual-so101-pickvials}"
-DATASET_ROOT="$REPO_DIR/datasets"
-DATASET_PATH="$DATASET_ROOT/$(basename "$DATASET_REPO_ID")"
-
-# Checkpoints live inside the repo so they survive reboots (not /tmp).
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/checkpoints/so101_bimanual_finetune}"
 
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
@@ -132,71 +128,29 @@ else
     fi
 fi
 
-# ── Phase 4: Dataset download + prep ─────────────────────────────────────────
-log "Phase 4: Dataset download + prep"
-
-# 4a. Download. The dataset is public, but HF rate-limits anonymous downloads
-#     per-IP; shared cloud IPs hit HTTP 429 fast, so provide HF_TOKEN.
-if [ -z "${HF_TOKEN:-}" ] && [ ! -f "$HOME/.cache/huggingface/token" ]; then
-    log "WARN: no HF_TOKEN / login detected — anonymous download may fail with HTTP 429."
-    log "      Set 'export HF_TOKEN=<read-token>' (or run 'hf auth login') before this script."
-fi
-if [ ! -f "$DATASET_PATH/meta/info.json" ]; then
-    log "Downloading $DATASET_REPO_ID -> $DATASET_PATH"
-    uv run hf download "$DATASET_REPO_ID" --repo-type dataset --local-dir "$DATASET_PATH"
-else
-    log "Dataset already present at $DATASET_PATH"
-fi
-
-# 4b. GR00T reads LeRobot v2.1 only; convert v3.0 in place (backs up to <dataset>_v30).
-if grep -q '"v3.0"' "$DATASET_PATH/meta/info.json"; then
-    log "Converting LeRobot v3.0 -> v2.1"
-    GIT_LFS_SKIP_SMUDGE=1 uv run --project scripts/lerobot_conversion --python 3.10 \
-        python scripts/lerobot_conversion/convert_v3_to_v2.py \
-        --repo-id "$(basename "$DATASET_REPO_ID")" \
-        --root "$DATASET_ROOT"
-else
-    log "Dataset already v2.1 — skipping conversion"
-fi
-
-# 4c. Install bimanual modality.json (not shipped with the dataset).
-log "Installing bimanual modality.json"
-cp examples/SO101_bimanual/modality.json "$DATASET_PATH/meta/modality.json"
-
-# 4d. Generate meta/relative_stats.json (required by N1.7 for custom embodiments).
-log "Generating dataset stats"
-uv run python gr00t/data/stats.py \
-    --dataset-path "$DATASET_PATH" \
-    --embodiment-tag NEW_EMBODIMENT \
-    --modality-config-path examples/SO101_bimanual/so101_bimanual_config.py
-
-# ── Phase 5: Verification ────────────────────────────────────────────────────
-log "Phase 5: Verification"
+# ── Phase 4: Verification ───────────────────────────────────────────────────
+log "Phase 4: Verification"
 
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}, GPU: {torch.cuda.get_device_name(0)}')"
 python -c "from gr00t.data.embodiment_tags import EmbodimentTag; print('GR00T imports OK')"
-python -c "import json; v=json.load(open('$DATASET_PATH/meta/info.json'))['codebase_version']; assert v=='v2.1', f'dataset is {v}'; print(f'Dataset version OK: {v}')"
-python -c "import os; p='$DATASET_PATH/meta/relative_stats.json'; print('relative_stats.json OK' if os.path.exists(p) else 'WARN: relative_stats.json missing')"
 
-log ""
-log "============================================================"
-log " Setup complete. Next steps: see CHEATSHEET.md (STEP 1 onward)."
-log "============================================================"
-log ""
-log "First (once): request access to BOTH nvidia/GR00T-N1.7-3B and the gated backbone"
-log "  nvidia/Cosmos-Reason2-2B, then 'hf auth login' + 'wandb login'  # see CHEATSHEET.md STEP 1"
-log "Finetune + auto-upload on success:"
-log ""
-echo "  cd $REPO_DIR && source .venv/bin/activate && export PATH=\"$HOME/.local/bin:\$PATH\""
-echo "  CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 \\"
-echo "  MAX_STEPS=30000 SAVE_STEPS=5000 SAVE_TOTAL_LIMIT=6 GLOBAL_BATCH_SIZE=64 \\"
-echo "  uv run bash examples/finetune.sh \\"
-echo "    --base-model-path $BASE_MODEL \\"
-echo "    --dataset-path $DATASET_PATH \\"
-echo "    --modality-config-path examples/SO101_bimanual/so101_bimanual_config.py \\"
-echo "    --embodiment-tag NEW_EMBODIMENT \\"
-echo "    --output-dir $OUTPUT_DIR \\"
-echo "    --wandb-project so101-bimanual \\"
-echo "    --experiment-name pickvials-n1p7-run1 \\"
-echo "  && uv run hf upload ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials \\"
-echo "       $OUTPUT_DIR . --repo-type model --exclude '*optimizer.pt'"
+# Hardware vs. the recipe in CHEATSHEET.md (4 GPUs / ~60 CPU / ~768 GiB RAM).
+# num_gpus drives per-device batch (global_batch_size // num_gpus) and DeepSpeed
+# gating, so a GPU-count mismatch silently changes the effective batch.
+python - <<'PY'
+import os, torch
+n_gpu = torch.cuda.device_count()
+n_cpu = os.cpu_count() or 0
+ram_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+print(f"Hardware: {n_gpu} GPU / {n_cpu} CPU / {ram_gb:.0f} GB RAM")
+if n_gpu != 4:
+    print(f"  WARN: recipe assumes NUM_GPUS=4, found {n_gpu}."
+          f" GLOBAL_BATCH_SIZE is a TOTAL (640 -> 160/GPU); recompute it for {n_gpu} GPUs.")
+if n_cpu < 48:
+    print(f"  WARN: only {n_cpu} CPUs ({n_cpu/max(n_gpu,1):.1f}/GPU) for 4-GPU dataloading.")
+if ram_gb < 600:
+    print(f"  WARN: only {ram_gb:.0f} GB RAM.")
+PY
+
+
+log "Setup complete. Next: CHEATSHEET.md STEP 1."

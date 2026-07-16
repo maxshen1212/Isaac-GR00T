@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import logging
+import os
 from pathlib import Path
 import shutil
 
@@ -107,6 +109,85 @@ class CheckpointFormatCallback(TrainerCallback):
             if wandb_config_src.exists():
                 print(f"Copying wandb_config.json from {wandb_config_src} to {wandb_config_dst}")
                 shutil.copy2(wandb_config_src, wandb_config_dst)
+
+
+class HubUploadCallback(TrainerCallback):
+    """Push each checkpoint to the HF Hub as soon as it is written.
+
+    Intended for preemptible / non-restartable instances where losing the local
+    disk loses the run: waiting for a fully successful exit to upload means a
+    mid-run failure yields nothing.
+
+    Must be registered *after* ``CheckpointFormatCallback`` — that callback is
+    what copies ``experiment_cfg/`` and the processor (incl. ``statistics.json``)
+    into ``checkpoint-{step}/``, and a checkpoint uploaded before it runs cannot
+    be loaded by ``Gr00tPolicy.from_pretrained``. HF invokes callbacks in
+    registration order.
+
+    Uploads run on a background thread so training is not blocked, and failures
+    are logged rather than raised: a Hub outage must not kill a multi-hour run.
+    """
+
+    def __init__(
+        self,
+        repo_id: str,
+        exclude: tuple[str, ...] = ("*optimizer.pt",),
+        private: bool = False,
+    ):
+        """
+        Args:
+            repo_id: Target Hub model repo, e.g. ``user/my-finetune``.
+            exclude: Glob patterns to skip. The default drops the optimizer state
+                (roughly half the bytes); it is only needed to resume training.
+            private: Create the repo private if it does not exist yet.
+        """
+        self.repo_id = repo_id
+        self.exclude = exclude
+        self.private = private
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._jobs: list[Future] = []
+        self._repo_ready = False
+
+    def _upload(self, checkpoint_dir: Path) -> None:
+        from huggingface_hub import HfApi
+
+        api = HfApi()
+        if not self._repo_ready:
+            api.create_repo(self.repo_id, repo_type="model", private=self.private, exist_ok=True)
+            self._repo_ready = True
+        logger.info(f"Uploading {checkpoint_dir.name} to {self.repo_id}")
+        api.upload_folder(
+            folder_path=str(checkpoint_dir),
+            path_in_repo=checkpoint_dir.name,
+            repo_id=self.repo_id,
+            repo_type="model",
+            ignore_patterns=list(self.exclude),
+        )
+        logger.info(f"Uploaded {checkpoint_dir.name} to {self.repo_id}")
+
+    def _upload_guarded(self, checkpoint_dir: Path) -> None:
+        try:
+            self._upload(checkpoint_dir)
+        except Exception as e:  # noqa: BLE001 - never let an upload kill training
+            logger.error(f"Upload of {checkpoint_dir.name} failed ({e}); training continues.")
+
+    def on_save(self, args, state, control, **kwargs):
+        # Every rank runs on_save; uploading from all of them would race on the
+        # same paths in the repo.
+        if not state.is_world_process_zero:
+            return
+        checkpoint_dir = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+        self._jobs.append(self._executor.submit(self._upload_guarded, checkpoint_dir))
+
+    def on_train_end(self, args, state, control, **kwargs):
+        # Without this the process can exit while the final checkpoint — the one
+        # most likely to be wanted — is still uploading.
+        if not state.is_world_process_zero:
+            return
+        pending = [j for j in self._jobs if not j.done()]
+        if pending:
+            logger.info(f"Waiting for {len(pending)} checkpoint upload(s) to finish...")
+        self._executor.shutdown(wait=True)
 
 
 class BestMetricCheckpointCallback(TrainerCallback):

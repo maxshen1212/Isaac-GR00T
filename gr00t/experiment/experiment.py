@@ -32,7 +32,11 @@ from gr00t.configs.training.training_config import check_resume_compatibility
 
 # Use custom trainer that profiles data loading & forward times
 from gr00t.experiment.trainer import Gr00tTrainer, ProfCallback
-from gr00t.experiment.utils import BestMetricCheckpointCallback, CheckpointFormatCallback
+from gr00t.experiment.utils import (
+    BestMetricCheckpointCallback,
+    CheckpointFormatCallback,
+    HubUploadCallback,
+)
 from gr00t.model import MODEL_REGISTRY
 from gr00t.utils.dist_utils import run_on_rank0, run_or_wait_on_rank0
 from gr00t.utils.initial_actions import INITIAL_ACTIONS_FILENAME, save_initial_actions
@@ -319,6 +323,18 @@ def run(config: Config):
             processor_dir=processor_dir,
         )
     )
+
+    # Opt-in per-checkpoint Hub upload, for instances that cannot be restarted and
+    # lose their disk on failure. Registered after CheckpointFormatCallback so the
+    # uploaded checkpoint already carries experiment_cfg/ and the processor.
+    upload_repo_id = os.environ.get("UPLOAD_TO_HUB_REPO")
+    if upload_repo_id:
+        trainer.add_callback(
+            HubUploadCallback(
+                repo_id=upload_repo_id,
+                private=os.environ.get("UPLOAD_TO_HUB_PRIVATE", "0") == "1",
+            )
+        )
 
     if config.training.save_best_eval_metric_name != "":
         trainer.add_callback(
