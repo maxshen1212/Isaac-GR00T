@@ -332,6 +332,7 @@ def run(config: Config):
         trainer.add_callback(
             HubUploadCallback(
                 repo_id=upload_repo_id,
+                experiment_name=experiment_name,
                 private=os.environ.get("UPLOAD_TO_HUB_PRIVATE", "0") == "1",
             )
         )

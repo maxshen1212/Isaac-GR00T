@@ -131,17 +131,23 @@ class HubUploadCallback(TrainerCallback):
     def __init__(
         self,
         repo_id: str,
+        experiment_name: str,
         exclude: tuple[str, ...] = ("*optimizer.pt",),
         private: bool = False,
     ):
         """
         Args:
             repo_id: Target Hub model repo, e.g. ``user/my-finetune``.
+            experiment_name: Prefixed onto every upload's ``path_in_repo`` (as
+                ``{experiment_name}/checkpoint-{step}``) so two runs pushing to
+                the same ``repo_id`` can't silently overwrite each other's
+                same-numbered checkpoint.
             exclude: Glob patterns to skip. The default drops the optimizer state
                 (roughly half the bytes); it is only needed to resume training.
             private: Create the repo private if it does not exist yet.
         """
         self.repo_id = repo_id
+        self.experiment_name = experiment_name
         self.exclude = exclude
         self.private = private
         self._executor = ThreadPoolExecutor(max_workers=1)
@@ -151,19 +157,20 @@ class HubUploadCallback(TrainerCallback):
     def _upload(self, checkpoint_dir: Path) -> None:
         from huggingface_hub import HfApi
 
+        path_in_repo = f"{self.experiment_name}/{checkpoint_dir.name}"
         api = HfApi()
         if not self._repo_ready:
             api.create_repo(self.repo_id, repo_type="model", private=self.private, exist_ok=True)
             self._repo_ready = True
-        logger.info(f"Uploading {checkpoint_dir.name} to {self.repo_id}")
+        logger.info(f"Uploading {checkpoint_dir.name} to {self.repo_id}/{path_in_repo}")
         api.upload_folder(
             folder_path=str(checkpoint_dir),
-            path_in_repo=checkpoint_dir.name,
+            path_in_repo=path_in_repo,
             repo_id=self.repo_id,
             repo_type="model",
             ignore_patterns=list(self.exclude),
         )
-        logger.info(f"Uploaded {checkpoint_dir.name} to {self.repo_id}")
+        logger.info(f"Uploaded {checkpoint_dir.name} to {self.repo_id}/{path_in_repo}")
 
     def _upload_guarded(self, checkpoint_dir: Path) -> None:
         try:

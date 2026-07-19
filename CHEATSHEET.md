@@ -2,8 +2,8 @@
 
 4× RTX PRO 6000 96GB / 60 CPU / 567 GiB RAM @ $10.51/hr。**用官方預設參數**(不碰 shard/rate)。
 
-> 🚫 這台**不能暫停**,信用點用完 = **整台連 checkpoint 一起刪除、不可復原**。
-> 所以:訓練**務必在 tmux 裡**,且**務必帶 `UPLOAD_TO_HUB_REPO`**(STEP 3)邊訓邊上傳。
+> 🚫 這台**不能暫停、只能刪除**,信用點用完 = **整台連 checkpoint 一起刪除、不可復原**。
+> 所以:訓練**務必在 tmux 裡**,**務必帶 `UPLOAD_TO_HUB_REPO`**(STEP 3)邊訓邊上傳,STEP 3 結尾會驗證上傳成功後**自動 `brev delete` 省錢**(因此 STEP 4a 改成從 HF 下載 checkpoint)。
 
 | 項目 | 值 |
 |---|---|
@@ -113,42 +113,99 @@ uv run bash examples/finetune.sh \
   --embodiment-tag NEW_EMBODIMENT \
   --output-dir ~/Isaac-GR00T/checkpoints/so101_bimanual_finetune \
   --wandb-project so101-bimanual --experiment-name pickvials-n1p7-run2
+
+# ↓↓↓ 訓練+上傳確認完成後自動刪除機器省錢(brev CLI 需先 login --token) ↓↓↓
+# 本地目錄 + HF 都存在才刪:只查 HF 會被舊 run 留下的同名 checkpoint 騙過(run2 是平的路徑)
+LOCAL_CKPT=~/Isaac-GR00T/checkpoints/so101_bimanual_finetune/pickvials-n1p7-run2/checkpoint-50000
+LAST_CKPT=checkpoint-50000
+if [ -d "$LOCAL_CKPT" ] && uv run hf download ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials \
+    --include "$LAST_CKPT/config.json" --local-dir /tmp/verify_upload >/tmp/verify_upload.log 2>&1; then
+  brev delete <INSTANCE_NAME>        # 名稱用 brev ls 查
+else
+  echo "!!! 驗證沒過,機器不刪——先跑 STEP 5 補傳,確認上傳後再手動 brev delete"
+fi
 ```
 
-- 離開 tmux(訓練繼續):`Ctrl-b` 然後 `d`。
-- **`UPLOAD_TO_HUB_REPO`(本 fork 新增)** 每存一個 checkpoint 就背景推上 HF,所以**不需要結尾 `&& hf upload`**。只在 rank0 上傳、失敗只記 log 不中斷、結束前等最後一個傳完。
-- HF repo 會是 `checkpoint-5000/` … `checkpoint-50000/`,每個自足可載入,載入時指到 `<repo>/checkpoint-50000`。
-- `NUM_GPUS=4` 自動開 DeepSpeed ZeRO-2(不用設定)。
+> 上段要貼進 tmux 裡跑,不能單獨存 `.sh`(`tmux new -s train` 會接管終端機)。存檔跑改用 `tmux new -d -s train "bash train_and_delete.sh"`(拿掉 `tmux new` 那行)。
+
+- 離開 tmux(訓練繼續):`Ctrl-b` 然後 `d`。`UPLOAD_TO_HUB_REPO` 邊存邊背景傳 HF,只 rank0 上傳,失敗記 log 不中斷。
+- 帶 `--experiment-name` 時本機路徑多一層:`<output-dir>/<experiment-name>/checkpoint-N`。
+- HF 上傳路徑:**run2(這次)是平的** `checkpoint-N`;**之後新 run 已改成巢狀** `<experiment-name>/checkpoint-N`(避免不同 run 撞 step 數互相覆蓋,見 `gr00t/experiment/utils.py` `HubUploadCallback`)。
+- `NUM_GPUS=4` 自動開 DeepSpeed ZeRO-2。
 
 ---
 
 ## STEP 4 — 選 checkpoint
 
+**4a**(open-loop)只能當健檢,不能排名——官方 `finetune_new_embodiment.md` 只到這步。**4b/4c**(rollout success rate)才是排名依據,repo 沒有官方文件寫這步,是延伸做法。
+
+### 4a. Open-loop 健檢
+
+> 訓練機已被自動刪除,在**任何一台裝了這個 repo + 資料集**的機器上先從 HF 下載 checkpoint 再健檢:
+
 ```bash
-for ckpt in 10000 20000 30000 40000 50000; do
+REPO=ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials
+mkdir -p ~/Isaac-GR00T/eval_plots ~/models/bimanual-pickvials
+for ckpt in 5000 10000 15000 20000 25000 30000 35000 40000 45000 50000; do
   echo "=== checkpoint-$ckpt ==="
+  uv run hf download $REPO \
+    --include "checkpoint-$ckpt/*" --exclude "checkpoint-$ckpt/global_step*" \
+    --local-dir ~/models/bimanual-pickvials
   uv run python gr00t/eval/open_loop_eval.py \
     --dataset-path ~/Isaac-GR00T/datasets/bimanual-so101-pickvials \
     --embodiment-tag NEW_EMBODIMENT \
-    --model-path ~/Isaac-GR00T/checkpoints/so101_bimanual_finetune/checkpoint-$ckpt \
-    --traj-ids 0 --execution-horizon 16 --steps 400
+    --model-path ~/models/bimanual-pickvials/checkpoint-$ckpt \
+    --traj-ids 0 --execution-horizon 16 --steps 400 \
+    --save-plot-path ~/Isaac-GR00T/eval_plots/checkpoint-$ckpt.jpeg
 done
 ```
 
-`Average MSE` 應隨 step **單調下降**(官方 `finetune_new_embodiment.md` Step 4)。flat/rising = 訓練沒在學。**最終以 sim rollout success rate 拍板**,MSE 只是健康檢查。
+> `--exclude "checkpoint-$ckpt/global_step*"` 擋掉 28GB 的 DeepSpeed optimizer(推論不需要,見 STEP 4b)。資料集(`~/Isaac-GR00T/datasets/bimanual-so101-pickvials`)若這台機器上沒有,先照 STEP 1 下載+轉換那段跑一次。
+
+看 `Average MSE`/`MAE` 是否隨 step 大致下降(flat/rising = 沒在學,可剔除)。**每個 checkpoint 要帶不同 `--save-plot-path`**(沒帶會 fallback 到同一個 `/tmp/open_loop_eval/traj_0.jpeg`,互相覆蓋)。機器沒畫面,圖要 `scp -r shadeform@<host>:~/Isaac-GR00T/eval_plots ./` 傳回本機看。
+
+### 4b. Sim rollout success rate 排名
+
+健檢後挑 3-4 個間隔(如 40000/45000/50000)實跑 rollout。**另一個 repo、另一台有 Isaac Sim 的機器**,指令詳見 `Sim-to-Real-SO-101-Workshop/run_cheatsheet.md`「Eval」段:
+
+```bash
+# --exclude 擋掉 28GB 的 DeepSpeed optimizer,推論不需要
+uv run hf download ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials \
+  --include "checkpoint-50000/*" --exclude "checkpoint-50000/global_step*" \
+  --local-dir ~/models/bimanual-pickvials
+
+# 終端機 A(~/Isaac-GR00T)
+uv run python gr00t/eval/run_gr00t_server.py \
+    --model-path ~/models/bimanual-pickvials/checkpoint-50000 \
+    --embodiment-tag new_embodiment \
+    --modality-config-path examples/SO101_bimanual/so101_bimanual_config.py
+
+# 終端機 B(~/env_isaaclab):印 Success Rate: X/Y (Z%)
+lerobot_eval_dual --task Lerobot-So101-Dual-Vials-To-Rack-Eval --num_episodes 10 \
+    --policy_host localhost --policy_port 5555
+```
+
+換 checkpoint 就重下載/重起 server/重跑,10 集抓相對排名即可。
+
+### 4c. 真機 eval 拍板(co-trained 模型才需要)
+
+4b 選出前 1-2 名,用 `so101_eval.py`(NVIDIA Strategy 2 流程)跑真機驗證,以真機成功率做最終決定。
+
+> ⚠️ 不要預設 step 數最大 = 最好:real 資料佔比小,後段可能對那一小撮過擬合(sim 漲、真機反而退步)。務必實際比較,峰值常落在中段。
 
 ---
 
-## STEP 5 — 手動重傳(只在 log 出現 `Upload of ... failed` 時)
+## STEP 5 — 手動重傳(log 出現 `Upload of ... failed` 時)
 
 ```bash
-CK=~/Isaac-GR00T/checkpoints/so101_bimanual_finetune/checkpoint-50000
+EXP=pickvials-n1p7-run2
+CK=~/Isaac-GR00T/checkpoints/so101_bimanual_finetune/$EXP/checkpoint-50000
 uv run hf upload ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials \
   "$CK" "$(basename "$CK")" --repo-type model \
   --exclude 'global_step*' --exclude '*optimizer.pt'
 ```
 
-> `path_in_repo` 用 `checkpoint-<step>`(跟 callback 一致);`--exclude 'global_step*'` 擋掉 DeepSpeed optimizer(4 卡的 optimizer 在這資料夾,`*optimizer.pt` 擋不到)。
+> `path_in_repo` 要對齊原本上傳方式(見 STEP 3):run2 用平的;之後新 run 要改成 `"$EXP/$(basename "$CK")"`。`--exclude 'global_step*'` 擋 DeepSpeed optimizer(`*optimizer.pt` 擋不到,run2 自動上傳漏了這個,白傳 28.78GB)。
 
 ---
 
