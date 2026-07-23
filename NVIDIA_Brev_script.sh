@@ -1,7 +1,7 @@
 #!/bin/bash
 # Environment setup only: deps, repo, venv, GPU. No credentials, no data, no training.
 # Paste into Brev's Setup Script field. Everything after this: CHEATSHEET.md.
-# Target: 4x RTX PRO 6000 (Blackwell, sm_120, 96GB) / 60 CPU / 768 GiB RAM.
+# Target: 8x H100 SXM (Hopper, sm_90, 80GB) / 128 CPU / ~1.5 TiB RAM.
 #
 # Deliberately does NOT fetch the dataset: that step runs after `hf auth login`
 # (CHEATSHEET.md STEP 1), which keeps HF credentials out of this file and, because
@@ -121,7 +121,7 @@ else
         log "GPU visible via cuda-compat — persisting to ~/.bashrc."
         grep -qF "cuda-12.8/compat" "$HOME/.bashrc" 2>/dev/null || echo "$COMPAT_LINE" >> "$HOME/.bashrc"
     else
-        log "ERROR: GPU still unavailable (likely CUDA error 803). Blackwell/CUDA 12.8 needs driver >= 570."
+        log "ERROR: GPU still unavailable (likely CUDA error 803): driver is too old for CUDA 12.8."
         log "  Fix: reboot the instance, or use a base image with a newer driver."
         nvidia-smi || true
         exit 1
@@ -134,7 +134,7 @@ log "Phase 4: Verification"
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}, GPU: {torch.cuda.get_device_name(0)}')"
 python -c "from gr00t.data.embodiment_tags import EmbodimentTag; print('GR00T imports OK')"
 
-# Hardware vs. the recipe in CHEATSHEET.md (4 GPUs / ~60 CPU / ~768 GiB RAM).
+# Hardware vs. the recipe in CHEATSHEET.md (8 GPUs / ~128 CPU / ~1.5 TiB RAM).
 # num_gpus drives per-device batch (global_batch_size // num_gpus) and DeepSpeed
 # gating, so a GPU-count mismatch silently changes the effective batch.
 python - <<'PY'
@@ -143,12 +143,12 @@ n_gpu = torch.cuda.device_count()
 n_cpu = os.cpu_count() or 0
 ram_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
 print(f"Hardware: {n_gpu} GPU / {n_cpu} CPU / {ram_gb:.0f} GB RAM")
-if n_gpu != 4:
-    print(f"  WARN: recipe assumes NUM_GPUS=4, found {n_gpu}."
-          f" GLOBAL_BATCH_SIZE is a TOTAL (640 -> 160/GPU); recompute it for {n_gpu} GPUs.")
-if n_cpu < 48:
-    print(f"  WARN: only {n_cpu} CPUs ({n_cpu/max(n_gpu,1):.1f}/GPU) for 4-GPU dataloading.")
-if ram_gb < 600:
+if n_gpu != 8:
+    print(f"  WARN: recipe assumes NUM_GPUS=8, found {n_gpu}."
+          f" GLOBAL_BATCH_SIZE is a TOTAL (640 -> 80/GPU); recompute it for {n_gpu} GPUs.")
+if n_cpu < 96:
+    print(f"  WARN: only {n_cpu} CPUs ({n_cpu/max(n_gpu,1):.1f}/GPU) for 8-GPU dataloading.")
+if ram_gb < 1200:
     print(f"  WARN: only {ram_gb:.0f} GB RAM.")
 PY
 

@@ -132,7 +132,7 @@ class HubUploadCallback(TrainerCallback):
         self,
         repo_id: str,
         experiment_name: str,
-        exclude: tuple[str, ...] = ("*optimizer.pt",),
+        exclude: tuple[str, ...] = ("*optimizer.pt", "global_step*"),
         private: bool = False,
     ):
         """
@@ -143,7 +143,8 @@ class HubUploadCallback(TrainerCallback):
                 the same ``repo_id`` can't silently overwrite each other's
                 same-numbered checkpoint.
             exclude: Glob patterns to skip. The default drops the optimizer state
-                (roughly half the bytes); it is only needed to resume training.
+                and the DeepSpeed ``global_step*`` shards (~28 GB per checkpoint);
+                both are only needed to resume training, not for inference.
             private: Create the repo private if it does not exist yet.
         """
         self.repo_id = repo_id
