@@ -76,7 +76,7 @@ DS_SIM=~/Isaac-GR00T/datasets/bimanual-so101-pickvials-sim-10fps
 
 USE_WANDB=0 NUM_GPUS=8 \
 MAX_STEPS=200 SAVE_STEPS=100 SAVE_TOTAL_LIMIT=2 GLOBAL_BATCH_SIZE=640 \
-DATALOADER_NUM_WORKERS=4 \
+DATALOADER_NUM_WORKERS=13 \
 UPLOAD_TO_HUB_REPO=ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials-cotrain-dryrun \
 UPLOAD_TO_HUB_PRIVATE=1 \
 uv run bash examples/finetune.sh \
@@ -121,7 +121,7 @@ DS_SIM=~/Isaac-GR00T/datasets/bimanual-so101-pickvials-sim-10fps
 NUM_GPUS=8 \
 GLOBAL_BATCH_SIZE=640 \
 MAX_STEPS=25000 SAVE_STEPS=2500 SAVE_TOTAL_LIMIT=10 \
-DATALOADER_NUM_WORKERS=4 \
+DATALOADER_NUM_WORKERS=13 \
 UPLOAD_TO_HUB_REPO=ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials-cotrain \
 uv run bash examples/finetune.sh \
   --base-model-path nvidia/GR00T-N1.7-3B \
