@@ -74,7 +74,7 @@ done
 DS_REAL=~/Isaac-GR00T/datasets/bimanual-so101-pickvials-real-10fps
 DS_SIM=~/Isaac-GR00T/datasets/bimanual-so101-pickvials-sim-10fps
 
-USE_WANDB=0 NUM_GPUS=8 \
+USE_WANDB=1 NUM_GPUS=8 \
 MAX_STEPS=200 SAVE_STEPS=100 SAVE_TOTAL_LIMIT=2 GLOBAL_BATCH_SIZE=640 \
 DATALOADER_NUM_WORKERS=13 \
 UPLOAD_TO_HUB_REPO=ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials-cotrain-dryrun \
@@ -173,7 +173,7 @@ for ckpt in 2500 5000 7500 10000 12500 15000 17500 20000 22500 25000; do
     --model-path ~/models/bimanual-pickvials-cotrain/$EXP/checkpoint-$ckpt \
     --traj-ids 0 --execution-horizon 16 --steps 400 \
     --save-plot-path ~/Isaac-GR00T/eval_plots/checkpoint-$ckpt.jpeg
-done
+done 2>&1 | tee ~/Isaac-GR00T/eval_plots/eval_output.txt
 ```
 
 > **open-loop 用 real-10fps**(健檢的是對真機軌跡的 MSE;sim 那套交給 4b)。看 `Average MSE`/`MAE` 是否隨 step 大致下降(flat/rising = 沒在學,可剔除)。**每個 checkpoint 要帶不同 `--save-plot-path`**(沒帶會互相覆蓋)。機器沒畫面,圖用 `scp -r shadeform@<host>:~/Isaac-GR00T/eval_plots ./` 傳回本機看。
