@@ -202,9 +202,81 @@ lerobot_eval_dual --task Lerobot-So101-Dual-Vials-To-Rack-Eval --num_episodes 10
 
 ### 4c. 真機 eval 拍板(本次是 co-trained,**必跑**)
 
-4b 選出前 1-2 名,用 `so101_eval.py`(NVIDIA Strategy 2 流程)跑真機驗證,以真機成功率做最終決定。
+4b 選出前 1-2 名,用 **`gr00t/eval/real_robot/SO101_bimanual/eval_so101_dual.py`** 跑真機成功率做最終決定。
+那支就是官方 `SO100/eval_so100.py` 的雙臂版(235 行,官方 291 行),同樣是
+connect → `while True`:取 obs → policy → 執行 chunk。只差兩件事:12 維 + 3 相機的 adapter、
+以及 10 Hz 控制頻率。**不動上游 `SO100/`**——它 pin 的 lerobot commit 早於 `bi_so_follower` 重構。
+
+**三個坑:**
+1. **控制頻率 10 Hz**(= 訓練資料集 fps,已查 `meta/info.json`),不是錄製的 30 fps。官方 client
+   一律拿資料採集頻率當控制頻率(DROID 15、SO100 1/30),不內插。用 30 Hz 會快 3 倍。
+   16 步 chunk 因此覆蓋 1.6 秒,遠大於推論延遲(實測 0.070 s)→ 不會有 stop-and-go。
+2. **server 已把 relative 轉成絕對關節目標**(`decode_action` 用 client 送的 state)。
+   client 不可再加回 state,也不可套 `SO101_USD_MAPPING`(那是 sim USD 單位的產物)。
+3. **有 `--model-path` 時 `--modality-config-path` 被靜默忽略**,config 來自 checkpoint 的 processor。
+
+**兩個環境不可混用**:server 用 Isaac-GR00T 的 `.venv`(`torch 2.9.0`/`transformers 4.57.3`),
+client 沿用 lerobot 的 `.venv`。**server 借用 lerobot venv 會讓前處理跟訓練不同**(它是 5.5.4/2.11.0)。
+
+```bash
+# client 一次性設定
+cd /home/graphen/sim2real/lerobot
+uv pip install msgpack==1.1.0 msgpack-numpy==0.4.8
+VIRTUAL_ENV=$PWD/.venv uv pip install --no-deps -e /home/graphen/sim2real/Isaac-GR00T
+```
+
+> Isaac-GR00T 首次 `uv sync` 會卡在 `torchcodec-...aarch64.whl`(未 smudge 的 LFS pointer)→
+> `git lfs install --local && git lfs pull --include="scripts/deployment/dgpu/wheels/*.whl"`
+> server 首次啟動另會下載 gated backbone `nvidia/Cosmos-Reason2-2B`(~5GB),載完 GPU 佔 7.3 GB。
+
+```bash
+# 終端機 A — server
+uv run python gr00t/eval/run_gr00t_server.py \
+    --model-path ~/models/bimanual-pickvials-cotrain/pickvials-n1p7-run3/checkpoint-25000 \
+    --embodiment-tag NEW_EMBODIMENT --port 5555
+
+# 終端機 B — client(旗標一律「底線」,draccus;4a 的 open_loop_eval.py 走 tyro 用連字號,別互抄)
+cd gr00t/eval/real_robot/SO101_bimanual
+PY=/home/graphen/sim2real/lerobot/.venv/bin/python
+
+# 第一次帶電:限位設到最小,手放電源開關。0.5°/write @10Hz ≈ 5°/s,慢到可以用手擋。
+# 會大量 clamp、機器人嚴重落後 policy,正常。只確認運動方向對、Ctrl-C 收得乾淨。
+$PY eval_so101_dual.py \
+  --max_relative_target '{"shoulder_pan":0.5,"shoulder_lift":0.5,"elbow_flex":0.5,"wrist_flex":0.5,"wrist_roll":0.5,"gripper":1.0}'
+
+# 確認沒問題後全速跑,**用 lerobot-replay 重播真人 demo 並排比速度**。
+# 比 demo 快 = fps 設錯了,這比任何其他問題都危險。
+$PY eval_so101_dual.py
+```
+
+硬體參數(port / 校正目錄 / 三台相機序號 / task 字串)都是 script 預設值,平常不用帶。
+換 checkpoint 只重啟 server,client 不動。
+
+**跑法**:一次執行 = 一集。script 是 `while True`,**不會自己停**——看著它做,成功或明顯卡住就
+**Ctrl-C**,人工把試管擺回去,再跑一次。成功率自己記(紙筆或試算表都行)。
+
+- 判定用二元「90 秒內 4 支全進架子」(對齊 sim 的 all-or-nothing)。**90 秒是你自己看錶的協定,
+  script 不會強制**;順手記 `vials_placed` (0-4) 當低雜訊的第二指標。
+- 操作者/硬體失誤(試管掉出桌面、人碰到手臂)那次不計入分母。
+- **N=20**。N=10 時 50% 的 95% CI 約 ±31 個百分點,分不出 30% 和 70%。
+- 跑完換純 sim checkpoint(只改 server `--model-path`)重跑一輪,得 co-train vs sim-only 差距。
+
+> **⚠️ Ctrl-C 會讓手臂軟掉**:`disable_torque_on_disconnect` 是 lerobot 預設的 `True`,
+> 所以停止時 torque 會斷、手臂下墜(跟 `lerobot-record` 收尾一樣)。差別在這裡的跑法就是
+> **在動作中途按 Ctrl-C**——夾著試管停手的話它會掉。要停之前先讓它把手放低,或接受這個行為。
+
+> **⚠️ 相機與馬達搶 USB**:`SOFollower.connect()` 是先開三台 RealSense 才 `configure()` 寫馬達,
+> 而 Feetech 的 write 預設 `num_retry=0`——單一封包損毀就會讓 connect 整個爆掉
+> (`Failed to write 'Lock' on id_=6`)。實測 12 顆馬達在沒有相機串流時全部正常。
+> 再遇到就重跑一次;一直失敗就用 `lsusb -t` 看三台 D435i 是不是掛在同一個 root hub 分開接。
+> (相機 640×480@30 是寫死在 `make_robot()` 裡的,沒有 CLI 旗標,要降 fps 得改那一行。)
+
+> **跟 sim 的 50% 對照時三個不對等要註明**:① sim 是 60 Hz,16 步 chunk 在 0.27 秒跑完,
+> 比資料代表的 1.6 秒快 6 倍(physics-time vs data-time,不該轉移);② sim 自動判定
+> (`confirm_steps=25`)vs 真機人判;③ sim 22.5 秒 vs 真機 90 秒。50% 是參考點,不是嚴格 baseline。
 
 > ⚠️ 不要預設 step 數最大 = 最好:real 資料佔比小,後段可能對那一小撮過擬合。務必實際比較,峰值常落在中段。
+
 
 ---
 
