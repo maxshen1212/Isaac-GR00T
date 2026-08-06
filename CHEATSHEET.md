@@ -189,7 +189,7 @@ uv run hf download ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials-cotrain \
 
 # 終端機 A(~/Isaac-GR00T)
 uv run python gr00t/eval/run_gr00t_server.py \
-    --model-path /home/graphen/models/bimanual-pickvials-sim/pickvials-n1p7-run2/checkpoint-50000 \
+    --model-path /home/graphen/models/bimanual-pickvials-cotrain/pickvials-n1p7-run3/checkpoint-25000 \
     --embodiment-tag new_embodiment \
     --modality-config-path examples/SO101_bimanual/so101_bimanual_config.py
 

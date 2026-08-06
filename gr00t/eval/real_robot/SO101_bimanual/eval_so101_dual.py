@@ -36,12 +36,12 @@ Setup and bring-up: CHEATSHEET.md, section "4c. 真機 eval 拍板".
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path
+import sys
 import time
 from typing import Any
 
 import numpy as np
 import zmq
-
 
 try:
     import draccus
@@ -59,13 +59,25 @@ except ModuleNotFoundError as exc:
         ) from None
     raise
 
+from gr00t.eval._horizon_contract import (  # noqa: E402
+    PolicyHorizonSpec,
+    migrate_deprecated_action_horizon_argv,
+)
 from gr00t.policy.server_client import PolicyClient  # noqa: E402
 
-
 # Must match examples/SO101_bimanual/modality.json.
-JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
+JOINTS = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+)
 CAMERAS = ("center", "wrist_left", "wrist_right")
-STATE_KEYS = tuple(f"left_{j}.pos" for j in JOINTS) + tuple(f"right_{j}.pos" for j in JOINTS)
+STATE_KEYS = tuple(f"left_{j}.pos" for j in JOINTS) + tuple(
+    f"right_{j}.pos" for j in JOINTS
+)
 LANG_KEY = "annotation.human.task_description"
 
 
@@ -80,7 +92,9 @@ class So101BimanualAdapter:
         def arm(prefix: str) -> np.ndarray:
             # float32 is load-bearing: LeRobot returns Python floats and a bare
             # np.array() gives float64, which the server rejects outright.
-            return np.asarray([obs[f"{prefix}{j}.pos"] for j in JOINTS], dtype=np.float32)
+            return np.asarray(
+                [obs[f"{prefix}{j}.pos"] for j in JOINTS], dtype=np.float32
+            )
 
         left, right = arm("left_"), arm("right_")
         return {
@@ -103,10 +117,16 @@ class So101BimanualAdapter:
         targets using the state we sent, so these go straight to the robot: no adding
         the state back, and no joint remapping.
         """
-        left = np.concatenate([chunk["left_arm"][0, t], chunk["left_gripper"][0, t]])
-        right = np.concatenate([chunk["right_arm"][0, t], chunk["right_gripper"][0, t]])
+        left = np.concatenate(
+            [chunk["left_arm"][0, t], chunk["left_gripper"][0, t]]
+        )
+        right = np.concatenate(
+            [chunk["right_arm"][0, t], chunk["right_gripper"][0, t]]
+        )
         action = {f"left_{j}.pos": float(left[i]) for i, j in enumerate(JOINTS)}
-        action.update({f"right_{j}.pos": float(right[i]) for i, j in enumerate(JOINTS)})
+        action.update(
+            {f"right_{j}.pos": float(right[i]) for i, j in enumerate(JOINTS)}
+        )
         return action
 
     def get_action(self, obs: dict) -> list[dict[str, float]]:
@@ -121,7 +141,11 @@ class EvalConfig:
 
     policy_host: str = "localhost"
     policy_port: int = 5555
-    action_horizon: int = 16
+    # Open-loop execution length: how many steps of each predicted chunk are sent to
+    # the robot before re-planning. NOT the chunk length itself -- that is the model's
+    # `action_horizon`, read back from the server (see PolicyHorizonSpec). `None`
+    # executes the full chunk.
+    execution_horizon: int | None = None
     lang_instruction: str = "Pick up the vials and place them into the rack"
 
     # Control rate == training dataset fps (10 fps for these checkpoints). Running at
@@ -130,7 +154,9 @@ class EvalConfig:
 
     # Hardware. Defaults match calibration/config/bimanual_so101_record_config.yaml.
     robot_id: str = "bimanual_so101_follower"
-    calibration_dir: str = "/home/graphen/sim2real/lerobot/calibration/bimanual_follower"
+    calibration_dir: str = (
+        "/home/graphen/sim2real/lerobot/calibration/bimanual_follower"
+    )
     left_port: str = "/dev/ttyFollowerLeft"
     right_port: str = "/dev/ttyFollowerRight"
     camera_serials: dict[str, str] = field(
@@ -153,7 +179,9 @@ def make_robot(cfg: EvalConfig) -> BiSOFollower:
     def arm(port: str) -> SOFollowerConfig:
         # use_degrees=True to match how the dataset was recorded.
         return SOFollowerConfig(
-            port=port, use_degrees=True, max_relative_target=dict(cfg.max_relative_target)
+            port=port,
+            use_degrees=True,
+            max_relative_target=dict(cfg.max_relative_target),
         )
 
     robot = BiSOFollower(
@@ -196,7 +224,9 @@ def disconnect(robot: BiSOFollower) -> None:
 
 
 @draccus.wrap()
-def eval(cfg: EvalConfig):  # noqa: A001 - entry-point name mirrors eval_so100.py
+def eval(
+    cfg: EvalConfig,
+):  # noqa: A001 - entry-point name mirrors eval_so100.py
     """One invocation = one episode. Judge the outcome yourself, reset the scene, re-run."""
     init_logging()
     period = 1.0 / cfg.fps
@@ -208,19 +238,32 @@ def eval(cfg: EvalConfig):  # noqa: A001 - entry-point name mirrors eval_so100.p
     policy_client.context.setsockopt(zmq.LINGER, 0)
     policy = So101BimanualAdapter(policy_client, cfg.lang_instruction)
 
+    # Ask the server for the chunk length instead of assuming it: a bare slice would
+    # silently execute fewer steps than requested if the checkpoint predicts a shorter
+    # chunk. This also validates execution_horizon against it.
+    horizons = PolicyHorizonSpec.from_policy(
+        policy_client, n_action_steps=cfg.execution_horizon
+    )
+
     robot = make_robot(cfg)
-    log_say(f'Policy ready: "{cfg.lang_instruction}"', cfg.play_sounds, blocking=True)
+    log_say(
+        f'Policy ready: "{cfg.lang_instruction}"',
+        cfg.play_sounds,
+        blocking=True,
+    )
     logging.info(
-        "%.0f Hz, %d actions per chunk -> re-planning every %.2f s. Ctrl-C to stop.",
+        "%.0f Hz, model predicts %d actions per chunk, executing %d of them "
+        "-> re-planning every %.2f s. Ctrl-C to stop.",
         cfg.fps,
-        cfg.action_horizon,
-        cfg.action_horizon / cfg.fps,
+        horizons.action_horizon,
+        horizons.n_action_steps,
+        horizons.n_action_steps / cfg.fps,
     )
 
     try:
         while True:
             obs = robot.get_observation()
-            for action in policy.get_action(obs)[: cfg.action_horizon]:
+            for action in policy.get_action(obs)[: horizons.n_action_steps]:
                 tic = time.perf_counter()
                 robot.send_action(action)
                 elapsed = time.perf_counter() - tic
@@ -234,4 +277,15 @@ def eval(cfg: EvalConfig):  # noqa: A001 - entry-point name mirrors eval_so100.p
 
 
 if __name__ == "__main__":
+    if migrate_deprecated_action_horizon_argv():
+        # The shared helper emits the tyro-style `--execution-horizon`. This script is
+        # draccus, whose flags are underscore-only, so translate before it parses.
+        for i, tok in enumerate(sys.argv):
+            if tok == "--execution-horizon":
+                sys.argv[i] = "--execution_horizon"
+            elif tok.startswith("--execution-horizon="):
+                sys.argv[i] = "--execution_horizon=" + tok.split("=", 1)[1]
+        logging.warning(
+            "--action_horizon is deprecated; use --execution_horizon."
+        )
     eval()
