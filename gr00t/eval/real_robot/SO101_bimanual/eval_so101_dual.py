@@ -22,7 +22,8 @@ connect the robot, then loop observation -> policy -> action chunk -> execute. T
 differences:
 
   * 12-D state/action split into left_arm / left_gripper / right_arm / right_gripper
-    and three cameras, driven through LeRobot's ``bi_so_follower``.
+    and three cameras, driven through LeRobot's ``bi_so101_follower``
+    (a local addition on branch ``n1.7-graphen``; see its docstring).
   * Runs at the TRAINING DATASET fps, as the official clients do (DROID hardcodes
     15 Hz for its 15 fps data; SO100 sleeps to 1/30 for its 30 fps data). These
     checkpoints were trained on 10 fps data, so a 16-step chunk covers 1.6 s.
@@ -46,8 +47,7 @@ import zmq
 try:
     import draccus
     from lerobot.cameras.realsense import RealSenseCameraConfig
-    from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
-    from lerobot.robots.so_follower import SOFollowerConfig
+    from lerobot.robots.bi_so101_follower import BiSO101Follower, BiSO101FollowerConfig
     from lerobot.utils.utils import init_logging, log_say
 except ModuleNotFoundError as exc:
     if exc.name is not None and (
@@ -166,8 +166,11 @@ class EvalConfig:
             "wrist_right": "138422072598",
         }
     )
-    # Per-motor cap on |goal - present| for one write, in degrees (gripper: 0-100 units).
-    # At fps=10 a cap of 3.0 means 30 deg/s.
+    # Per-motor cap on |goal - present| for one write, in NORMALIZED units -- LeRobot
+    # applies it after normalization, so on 0.4.x (use_degrees=False) the arm joints are
+    # RANGE_M100_100: 200 units span the joint's full calibrated travel, i.e. 1 unit =
+    # span/200 degrees. The gripper is RANGE_0_100 either way. At fps=10 a cap of 3.0
+    # means 30 units/s, roughly 30 deg/s on a joint whose span is about 200 degrees.
     max_relative_target: dict[str, float] = field(
         default_factory=lambda: dict.fromkeys(JOINTS, 3.0) | {"gripper": 8.0}
     )
@@ -175,24 +178,21 @@ class EvalConfig:
     play_sounds: bool = False
 
 
-def make_robot(cfg: EvalConfig) -> BiSOFollower:
-    def arm(port: str) -> SOFollowerConfig:
-        # use_degrees=True to match how the dataset was recorded.
-        return SOFollowerConfig(
-            port=port,
-            use_degrees=True,
-            max_relative_target=dict(cfg.max_relative_target),
-        )
-
-    robot = BiSOFollower(
-        BiSOFollowerConfig(
+def make_robot(cfg: EvalConfig) -> BiSO101Follower:
+    robot = BiSO101Follower(
+        BiSO101FollowerConfig(
             id=cfg.robot_id,
             calibration_dir=Path(cfg.calibration_dir),
-            left_arm_config=arm(cfg.left_port),
-            right_arm_config=arm(cfg.right_port),
-            # All three cameras at top level so observation keys stay unprefixed
-            # (`center`/`wrist_left`/`wrist_right`). One under right_arm_config would
-            # come out as `right_wrist_right` and no longer match the modality config.
+            # 0.4.x takes per-arm settings as FLAT fields, not a nested arm config.
+            # `use_degrees` is left at its default False -> RANGE_M100_100, matching
+            # how the dataset was recorded.
+            left_arm_port=cfg.left_port,
+            right_arm_port=cfg.right_port,
+            left_arm_max_relative_target=dict(cfg.max_relative_target),
+            right_arm_max_relative_target=dict(cfg.max_relative_target),
+            # Cameras belong to the bimanual robot itself, and 0.4.x uses their keys
+            # as-is, so observations come out as `center`/`wrist_left`/`wrist_right`
+            # and match the modality config with no workaround.
             cameras={
                 name: RealSenseCameraConfig(
                     serial_number_or_name=serial, width=640, height=480, fps=30
@@ -201,7 +201,7 @@ def make_robot(cfg: EvalConfig) -> BiSOFollower:
             },
         )
     )
-    # calibrate=False: SOFollower.calibrate() blocks on input() if the files are missing.
+    # calibrate=False: SO100Follower.calibrate() blocks on input() if the files are missing.
     try:
         robot.connect(calibrate=False)
     except Exception:
@@ -210,10 +210,12 @@ def make_robot(cfg: EvalConfig) -> BiSOFollower:
     return robot
 
 
-def disconnect(robot: BiSOFollower) -> None:
-    """Per-arm teardown. ``BiSOFollower.disconnect`` requires BOTH arms connected, so
-    it raises from a half-connected state and leaves RealSense pipelines open -- which
-    aborts the interpreter on the way out."""
+def disconnect(robot: BiSO101Follower) -> None:
+    """Per-component teardown. ``BiSO101Follower.disconnect`` calls each arm's
+    ``disconnect`` unguarded, so it raises from a half-connected state and never
+    reaches the cameras -- leaving RealSense pipelines open, which aborts the
+    interpreter on the way out. The cameras hang off the bimanual robot in 0.4.x,
+    not off the arms, so they need their own pass."""
     for name in ("left_arm", "right_arm"):
         try:
             arm = getattr(robot, name)
@@ -221,6 +223,12 @@ def disconnect(robot: BiSOFollower) -> None:
                 arm.disconnect()
         except Exception:
             logging.exception("%s teardown failed", name)
+    for cam_key, cam in robot.cameras.items():
+        try:
+            if cam.is_connected:
+                cam.disconnect()
+        except Exception:
+            logging.exception("camera %s teardown failed", cam_key)
 
 
 @draccus.wrap()
