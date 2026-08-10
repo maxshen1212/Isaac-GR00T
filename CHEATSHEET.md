@@ -205,7 +205,7 @@ lerobot_eval_dual --task Lerobot-So101-Dual-Vials-To-Rack-Eval --num_episodes 10
 4b 選出前 1-2 名,用 **`gr00t/eval/real_robot/SO101_bimanual/eval_so101_dual.py`** 跑真機成功率做最終決定。
 那支就是官方 `SO100/eval_so100.py` 的雙臂版(235 行,官方 291 行),同樣是
 connect → `while True`:取 obs → policy → 執行 chunk。只差兩件事:12 維 + 3 相機的 adapter、
-以及 10 Hz 控制頻率。**不動上游 `SO100/`**——它 pin 的 lerobot commit 早於 `bi_so_follower` 重構。
+以及 10 Hz 控制頻率。**不動上游 `SO100/`**——它 pin 的 lerobot commit 更舊,且是單臂結構。
 
 **三個坑:**
 1. **控制頻率 10 Hz**(= 訓練資料集 fps,已查 `meta/info.json`),不是錄製的 30 fps。官方 client
