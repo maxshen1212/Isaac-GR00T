@@ -155,7 +155,7 @@ class EvalConfig:
     # Hardware. Defaults match calibration/config/bimanual_so101_record_config.yaml.
     robot_id: str = "bimanual_so101_follower"
     calibration_dir: str = (
-        "/home/graphen/sim2real/lerobot/calibration/bimanual_follower"
+        "/home/graphen/sim2real/Sim-to-Real-SO-101-Workshop/calibration/bimanual_follower"
     )
     left_port: str = "/dev/ttyFollowerLeft"
     right_port: str = "/dev/ttyFollowerRight"

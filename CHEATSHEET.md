@@ -180,7 +180,7 @@ done 2>&1 | tee ~/Isaac-GR00T/eval_plots/eval_output.txt
 
 ### 4b. Sim rollout success rate 排名
 
-健檢後挑 3 個間隔(如 15000/20000/25000)實跑 rollout。**另一台有 Isaac Sim 的機器**,指令詳見 `Sim-to-Real-SO-101-Workshop/run_cheatsheet.md`「Eval」段:
+健檢後挑 3 個間隔(如 15000/20000/25000)實跑 rollout。**另一台有 Isaac Sim 的機器**,指令詳見 `Sim-to-Real-SO-101-Workshop/run_cheatsheet.md` §6(Eval — Sim):
 
 ```bash
 uv run hf download ChihHanShen/gr00t-n1.7-so101-bimanual-pickvials-cotrain \
