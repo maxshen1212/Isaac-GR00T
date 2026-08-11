@@ -146,7 +146,7 @@ class EvalConfig:
     # `action_horizon`, read back from the server (see PolicyHorizonSpec). `None`
     # executes the full chunk.
     execution_horizon: int | None = None
-    lang_instruction: str = "Pick up the vials and place them into the rack"
+    lang_instruction: str = "Pick up the vial and place it in the rack"
 
     # Control rate == training dataset fps (10 fps for these checkpoints). Running at
     # the 30 fps the data was *captured* at would drive the arms 3x too fast.
