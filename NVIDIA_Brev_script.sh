@@ -97,10 +97,28 @@ cd "$REPO_DIR"
 # ── Phase 3: Python environment ──────────────────────────────────────────────
 log "Phase 3: Python environment"
 
-if [ ! -d "$REPO_DIR/.venv" ]; then
-    bash scripts/deployment/dgpu/install_deps.sh   # ffmpeg/CUDA + uv sync + editable install
+# A bare `[ -d .venv ]` check is not enough: `uv sync` creates .venv/ (bin, lib,
+# pyvenv.cfg) *before* it downloads anything, so an interrupted sync — disk full,
+# network drop, Brev's setup-script timeout — leaves a valid-looking but EMPTY
+# venv. A directory check would then skip the repair on every later boot and
+# silently pin that empty venv forever. Probe the contents instead; `uv sync` is
+# idempotent, so re-running install_deps.sh when in doubt is safe.
+venv_ready() {
+    [ -x "$REPO_DIR/.venv/bin/python" ] && \
+        "$REPO_DIR/.venv/bin/python" -c "import torch, gr00t" &>/dev/null
+}
+
+if venv_ready; then
+    log ".venv already complete, skipping install_deps.sh"
 else
-    log ".venv already exists, skipping install_deps.sh"
+    [ -d "$REPO_DIR/.venv" ] && log ".venv exists but is incomplete — re-running install."
+    log "Free space on repo filesystem: $(df -Ph "$REPO_DIR" | awk 'NR==2 {print $4}') (need ~20 GB)"
+    bash scripts/deployment/dgpu/install_deps.sh   # ffmpeg/CUDA + uv sync + editable install
+    if ! venv_ready; then
+        log "ERROR: install_deps.sh finished but 'import torch, gr00t' still fails."
+        log "  Check disk space and the uv sync output above, then: rm -rf .venv && uv sync"
+        exit 1
+    fi
 fi
 source "$REPO_DIR/.venv/bin/activate"
 
@@ -109,6 +127,11 @@ source "$REPO_DIR/.venv/bin/activate"
 # when the driver natively supports CUDA 12.8 causes a user/kernel driver
 # mismatch (CUDA error 803).
 log "Phase 3.5: GPU enablement"
+
+# Keep "torch is missing" distinct from "torch can't see the GPU" — gpu_ok()
+# swallows stderr, so without this precheck a broken venv gets reported below as
+# a driver/CUDA-803 problem, sending you after the wrong bug entirely.
+python -c "import torch" || { log "ERROR: torch not importable — the venv is broken, not the driver."; exit 1; }
 
 gpu_ok() { python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; }
 
